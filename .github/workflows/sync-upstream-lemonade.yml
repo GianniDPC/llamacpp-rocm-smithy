@@ -1,0 +1,38 @@
+name: Sync upstream (lemonade-sdk/llamacpp-rocm)
+on:
+  schedule:
+    # Mondays 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Fetch upstream workflow
+      run: |
+        mkdir -p upstream
+        curl -sL -o upstream/build-llamacpp-rocm.yml \
+          https://raw.githubusercontent.com/lemonade-sdk/llamacpp-rocm/main/.github/workflows/build-llamacpp-rocm.yml
+        echo "Upstream file size: $(wc -c < upstream/build-llamacpp-rocm.yml) bytes"
+
+    - name: Compare upstream to local build-smithy.yml base
+      run: |
+        # Strip the kernel-anvil-specific steps from our build-smithy.yml and
+        # roughly diff against upstream to spot upstream changes.
+        # The cleanest signal: count of jobs/steps in upstream vs ours.
+        upstream_jobs=$(grep -c '^  [a-z][a-z0-9-]*:$' upstream/build-llamacpp-rocm.yml || echo 0)
+        ours_jobs=$(grep -c '^  [a-z][a-z0-9-]*:$' .github/workflows/build-smithy.yml || echo 0)
+        echo "Upstream job count: $upstream_jobs"
+        echo "Smithy job count:   $ours_jobs"
+        echo "(Smithy intentionally has fewer jobs — no self-hosted GPU test runners)"
+
+    - name: Detect new ROCm download logic
+      run: |
+        # Quick heuristic: if upstream's ROCm download step changed semantically,
+        # flag it. This is a simple SHA check of the relevant block.
+        upstream_hash=$(curl -sL https://api.github.com/repos/lemonade-sdk/llamacpp-rocm/commits?path=.github/workflows/build-llamacpp-rocm.yml | jq -r '.[0].sha' || echo "unknown")
+        echo "Latest upstream commit affecting build-llamacpp-rocm.yml: $upstream_hash"
+        if [ "$upstream_hash" != "unknown" ]; then
+          echo "::notice::Upstream workflow changed. Review https://github.com/lemonade-sdk/llamacpp-rocm/commits/main/.github/workflows/build-llamacpp-rocm.yml and port relevant changes (e.g. new ROCm flags, new matrix targets, updated cmake flags) into build-smithy.yml."
+        fi

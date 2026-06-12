@@ -1,0 +1,460 @@
+name: Build Llama.cpp + ROCm + kernel-anvil (Smithy)
+
+on:
+  workflow_dispatch:
+    inputs:
+      operating_systems:
+        description: 'OS to build for (comma-separated: windows,ubuntu)'
+        required: false
+        default: 'windows,ubuntu'
+      rocm_version:
+        description: 'ROCm version (e.g., 7.14.0a20260609) or "latest"'
+        required: false
+        default: 'latest'
+      llamacpp_version:
+        description: 'llama.cpp tag/branch/commit (must match what smithy.patch was generated against)'
+        required: false
+        default: 'ac4cdde'
+      create_release:
+        description: 'Create a GitHub release after successful build'
+        required: false
+        default: true
+        type: boolean
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  push:
+    branches: [main]
+    paths:
+      - 'patches/smithy.patch'
+      - '.github/workflows/build-smithy.yml'
+
+  # Every 2 days at 13:00 UTC (odd days of the month: 1, 3, 5, ...)
+  schedule:
+    - cron: '0 13 */2 * *'
+
+env:
+  OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'windows,ubuntu' }}
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
+  LLAMACPP_VERSION: ${{ github.event.inputs.llamacpp_version || 'ac4cdde' }}
+  # Single target: gfx1100 (RX 7900 XTX / RDNA3 dGPU). Extend by comma-separating: gfx1100;gfx1101;gfx1102;gfx1103
+  GFX_TARGETS: 'gfx1100'
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-22.04
+    outputs:
+      windows_matrix: ${{ steps.set-matrix.outputs.windows_matrix }}
+      ubuntu_matrix: ${{ steps.set-matrix.outputs.ubuntu_matrix }}
+      should_build_windows: ${{ steps.set-matrix.outputs.should_build_windows }}
+      should_build_ubuntu: ${{ steps.set-matrix.outputs.should_build_ubuntu }}
+    steps:
+    - name: Set matrix
+      id: set-matrix
+      run: |
+        targets="${{ env.GFX_TARGETS }}"
+        operating_systems="${{ env.OPERATING_SYSTEMS }}"
+
+        matrix_targets=$(echo "$targets" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | jq -R . | jq -s '{gfx_target: .}' | jq -c)
+
+        should_build_windows="false"
+        should_build_ubuntu="false"
+
+        if [[ "$operating_systems" == *"windows"* ]]; then
+          should_build_windows="true"
+          echo "windows_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+        fi
+        if [[ "$operating_systems" == *"ubuntu"* ]]; then
+          should_build_ubuntu="true"
+          echo "ubuntu_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+        fi
+
+        echo "should_build_windows=$should_build_windows" >> $GITHUB_OUTPUT
+        echo "should_build_ubuntu=$should_build_ubuntu" >> $GITHUB_OUTPUT
+
+  build-windows:
+    runs-on: windows-latest
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_build_windows == 'true'
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.windows_matrix)}}
+      fail-fast: false
+    outputs:
+      rocm_version: ${{ steps.set-outputs.outputs.rocm_version }}
+      llamacpp_commit_hash: ${{ steps.set-outputs.outputs.llamacpp_commit_hash }}
+
+    steps:
+    - name: Checkout repository (carries patches/smithy.patch)
+      uses: actions/checkout@v4
+
+    - name: Clean up existing directories
+      run: |
+        if (Test-Path "llama.cpp") { Remove-Item -Recurse -Force "llama.cpp" }
+        if (Test-Path "C:\opt\rocm") { Remove-Item -Recurse -Force "C:\opt\rocm" }
+        if (Test-Path "rocm.tar.gz") { Remove-Item -Force "rocm.tar.gz" }
+
+    - name: Install Visual Studio Build Tools
+      run: |
+        $vsInstallerUrl = "https://aka.ms/vs/17/release/vs_buildtools.exe"
+        $vsInstallerPath = "$env:TEMP\vs_buildtools.exe"
+        Invoke-WebRequest -Uri $vsInstallerUrl -OutFile $vsInstallerPath
+        Start-Process -FilePath $vsInstallerPath -ArgumentList "--quiet", "--wait", "--norestart", `
+          "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", `
+          "--add", "Microsoft.VisualStudio.Component.VC.CMake.Project", `
+          "--add", "Microsoft.VisualStudio.Component.VC.ATL", `
+          "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621" -Wait
+        Remove-Item $vsInstallerPath -Force
+
+    - name: Install build dependencies (ninja, perl)
+      run: |
+        $ninjaUrl = "https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-win.zip"
+        New-Item -ItemType Directory -Force -Path "C:\ninja" | Out-Null
+        Invoke-WebRequest -Uri $ninjaUrl -OutFile "$env:TEMP\ninja-win.zip"
+        Expand-Archive -Path "$env:TEMP\ninja-win.zip" -DestinationPath "C:\ninja" -Force
+        $perlUrl = "http://strawberryperl.com/download/5.32.1.1/strawberry-perl-5.32.1.1-64bit.msi"
+        Invoke-WebRequest -Uri $perlUrl -OutFile "$env:TEMP\strawberry-perl.msi"
+        Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\strawberry-perl.msi /quiet /norestart" -Wait
+        echo "C:\ninja" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Download ROCm nightly tarball (gfx110X-all)
+      run: |
+        $rocmVersion = "${{ env.ROCM_VERSION }}"
+        $s3Target = "gfx110X-all"
+        if ($rocmVersion -eq "latest") {
+          $s3Response = (Invoke-WebRequest "https://therock-nightly-tarball.s3.amazonaws.com/?prefix=therock-dist-windows-$s3Target-7").Content
+          $files = $s3Response -split '<Key>' | Where-Object {$_ -match '</Key>'} | ForEach-Object { ($_ -split '</Key>')[0] }
+          $versionFiles = @()
+          foreach ($file in $files) {
+            if ($file -match "therock-dist-windows-$s3Target-.*?(\d+\.\d+\.\d+(?:a|rc)\d+)\.tar\.gz") {
+              $versionFiles += [PSCustomObject]@{
+                File = $file
+                Version = $matches[1]
+                Major = [int]($matches[1] -split '\.')[0]
+                Minor = [int]($matches[1] -split '\.')[1]
+                Patch = [int](($matches[1] -split '\.')[2] -replace '(?:a|rc).*', '')
+                RC = [int]($matches[1] -replace '.*(?:a|rc)', '')
+                IsAlpha = $matches[1] -match 'a'
+              }
+            }
+          }
+          $latestFile = ($versionFiles | Sort-Object Major, Minor, Patch, @{Expression={if($_.IsAlpha){1}else{0}}}, RC | Select-Object -Last 1).File
+          $rocmVersion = $latestFile -replace ".*-$s3Target-(.*?)\.tar\.gz", '$1'
+          $rocmUrl = "https://therock-nightly-tarball.s3.amazonaws.com/$latestFile"
+        } else {
+          $rocmUrl = "https://therock-nightly-tarball.s3.amazonaws.com/therock-dist-windows-$s3Target-$rocmVersion.tar.gz"
+        }
+        echo "DETECTED_ROCM_VERSION=$rocmVersion" >> $env:GITHUB_ENV
+        Write-Host "Downloading: $rocmUrl"
+        Invoke-WebRequest -Uri $rocmUrl -OutFile "rocm.tar.gz"
+
+    - name: Extract ROCm to C:\opt\rocm
+      run: |
+        New-Item -ItemType Directory -Force -Path "C:\opt\rocm" | Out-Null
+        tar -xzf rocm.tar.gz -C C:\opt\rocm --strip-components=1
+
+    - name: Clone llama.cpp at pinned version
+      run: |
+        $llamacppVersion = "${{ env.LLAMACPP_VERSION }}"
+        if ($llamacppVersion -eq "latest") {
+          git clone --depth 1 --single-branch --branch master https://github.com/ggerganov/llama.cpp.git
+        } else {
+          git clone https://github.com/ggerganov/llama.cpp.git
+          cd llama.cpp
+          git checkout $llamacppVersion
+        }
+        cd llama.cpp
+        $commitHash = git rev-parse --short=5 HEAD
+        echo "LLAMACPP_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
+
+    - name: Apply kernel-anvil (Smithy) patch
+      run: |
+        cd llama.cpp
+        $checkOutput = git apply --check ..\patches\smithy.patch 2>&1
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::error::smithy.patch does not apply cleanly against llama.cpp commit ${env:LLAMACPP_COMMIT_HASH}."
+          Write-Host "::error::Patch error: $checkOutput"
+          Write-Host "::error::Regenerate patches/smithy.patch from your local C:\llama.cpp (where the patches are working) and commit the updated patch to this repo."
+          exit 1
+        }
+        git apply ..\patches\smithy.patch
+        Write-Host "Smithy patch applied:"
+        git status --short
+
+    - name: Build Llama.cpp + ROCm + Smithy
+      shell: cmd
+      run: |
+        set HIP_PATH=C:\opt\rocm
+        set HIP_PLATFORM=amd
+        set PATH=%HIP_PATH%\lib\llvm\bin;%HIP_PATH%\bin;%PATH%
+
+        call "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
+        set /p VS_PATH=<vs_path.txt
+        call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+
+        cd llama.cpp
+        mkdir build
+        cd build
+
+        cmake .. -G Ninja ^
+          -DCMAKE_C_COMPILER="C:\opt\rocm\lib\llvm\bin\clang.exe" ^
+          -DCMAKE_CXX_COMPILER="C:\opt\rocm\lib\llvm\bin\clang++.exe" ^
+          -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include" ^
+          -DCMAKE_CROSSCOMPILING=ON ^
+          -DCMAKE_BUILD_TYPE=Release ^
+          -DGPU_TARGETS="gfx1100" ^
+          -DBUILD_SHARED_LIBS=ON ^
+          -DLLAMA_BUILD_TESTS=OFF ^
+          -DGGML_HIP=ON ^
+          -DGGML_OPENMP=OFF ^
+          -DGGML_CUDA_FORCE_CUBLAS=OFF ^
+          -DGGML_RPC=ON ^
+          -DGGML_HIP_ROCWMMA_FATTN=OFF ^
+          -DLLAMA_BUILD_BORINGSSL=ON ^
+          -DGGML_NATIVE=OFF ^
+          -DGGML_STATIC=OFF ^
+          -DCMAKE_SYSTEM_NAME=Windows
+
+        cmake --build . -j %NUMBER_OF_PROCESSORS%
+
+    - name: Copy ROCm core DLLs to build directory
+      run: |
+        $buildBinPath = "llama.cpp\build\bin"
+        $rocmBinPath = "C:\opt\rocm\bin"
+        $filesToCopy = @("amdhip64_*.dll","rocm_kpack.dll","amd_comgr*.dll","libhipblas.dll","rocblas.dll","rocsolver.dll","hipblaslt.dll","libhipblaslt.dll","hipblas.dll")
+        foreach ($pattern in $filesToCopy) {
+          Get-ChildItem -Path $rocmBinPath -Name $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item "$rocmBinPath\$_" "$buildBinPath\$_"
+          }
+        }
+        if (Test-Path "$rocmBinPath\rocblas\library") { Copy-Item -Recurse -Force "$rocmBinPath\rocblas\library" "$buildBinPath\rocblas\library" }
+        if (Test-Path "$rocmBinPath\hipblaslt\library") { Copy-Item -Recurse -Force "$rocmBinPath\hipblaslt\library" "$buildBinPath\hipblaslt\library" }
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: smithy-windows-rocm-${{ matrix.gfx_target }}-x64
+        path: llama.cpp/build/bin/
+        retention-days: 30
+
+    - name: Set job outputs
+      id: set-outputs
+      run: |
+        $rocmVersion = if ($env:DETECTED_ROCM_VERSION) { $env:DETECTED_ROCM_VERSION } else { $env:ROCM_VERSION }
+        echo "rocm_version=$rocmVersion" >> $env:GITHUB_OUTPUT
+        echo "llamacpp_commit_hash=$env:LLAMACPP_COMMIT_HASH" >> $env:GITHUB_OUTPUT
+
+    - name: Cleanup
+      if: always()
+      run: |
+        if (Test-Path "rocm.tar.gz") { Remove-Item -Force "rocm.tar.gz" }
+        if (Test-Path "C:\opt\rocm") { Remove-Item -Recurse -Force "C:\opt\rocm" }
+        if (Test-Path "llama.cpp") { Remove-Item -Recurse -Force "llama.cpp" }
+
+  build-ubuntu:
+    runs-on: ubuntu-22.04
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_build_ubuntu == 'true'
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.ubuntu_matrix)}}
+      fail-fast: false
+    outputs:
+      rocm_version: ${{ steps.set-outputs.outputs.rocm_version }}
+      llamacpp_commit_hash: ${{ steps.set-outputs.outputs.llamacpp_commit_hash }}
+
+    steps:
+    - name: Free disk space
+      run: curl -fsSL https://raw.githubusercontent.com/kou/arrow/e49d8ae15583ceff03237571569099a6ad62be32/ci/scripts/util_free_space.sh | bash
+
+    - name: Checkout repository (carries patches/smithy.patch)
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y cmake ninja-build unzip curl patchelf
+
+    - name: Download and extract ROCm (gfx110X-all, stream)
+      run: |
+        rocm_version="${{ env.ROCM_VERSION }}"
+        s3_target="gfx110X-all"
+        if [ "$rocm_version" = "latest" ]; then
+          s3_response=$(curl -s "https://therock-nightly-tarball.s3.amazonaws.com/?prefix=therock-dist-linux-${s3_target}-7")
+          files=$(echo "$s3_response" | grep -oP '(?<=<Key>)[^<]*' | grep "therock-dist-linux-${s3_target}-")
+          latest_file=""
+          while IFS= read -r file; do
+            if [[ "$file" =~ therock-dist-linux-${s3_target}-.*?([0-9]+\.[0-9]+\.[0-9]+(a|rc)[0-9]+)\.tar\.gz ]]; then
+              latest_file="$file"
+            fi
+          done <<< "$files"
+          rocm_version=$(echo "$latest_file" | grep -oP '\d+\.\d+\.\d+(a|rc)\d+')
+          rocm_url="https://therock-nightly-tarball.s3.amazonaws.com/$latest_file"
+        else
+          rocm_url="https://therock-nightly-tarball.s3.amazonaws.com/therock-dist-linux-${s3_target}-${rocm_version}.tar.gz"
+        fi
+        echo "DETECTED_ROCM_VERSION=$rocm_version" >> $GITHUB_ENV
+        sudo mkdir -p /opt/rocm
+        curl -sL "$rocm_url" | sudo tar --use-compress-program=gzip -xf - -C /opt/rocm --strip-components=1
+
+    - name: Set ROCm environment variables
+      run: |
+        echo "HIP_PATH=/opt/rocm" >> $GITHUB_ENV
+        echo "ROCM_PATH=/opt/rocm" >> $GITHUB_ENV
+        echo "HIP_PLATFORM=amd" >> $GITHUB_ENV
+        echo "HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode" >> $GITHUB_ENV
+        echo "/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH" >> $GITHUB_PATH
+        echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+
+    - name: Clone llama.cpp at pinned version
+      run: |
+        llamacpp_version="${{ env.LLAMACPP_VERSION }}"
+        if [ "$llamacpp_version" = "latest" ]; then
+          git clone --depth 1 --single-branch --branch master https://github.com/ggerganov/llama.cpp.git
+        else
+          git clone https://github.com/ggerganov/llama.cpp.git
+          cd llama.cpp
+          git checkout "$llamacpp_version"
+        fi
+        cd llama.cpp
+        commit_hash=$(git rev-parse --short=5 HEAD)
+        echo "LLAMACPP_COMMIT_HASH=$commit_hash" >> $GITHUB_ENV
+
+    - name: Apply kernel-anvil (Smithy) patch
+      run: |
+        cd llama.cpp
+        if ! git apply --check ../patches/smithy.patch; then
+          echo "::error::smithy.patch does not apply cleanly against llama.cpp commit ${LLAMACPP_COMMIT_HASH}."
+          echo "::error::Regenerate patches/smithy.patch from your local C:\llama.cpp and commit the updated patch."
+          exit 1
+        fi
+        git apply ../patches/smithy.patch
+        echo "Smithy patch applied:"
+        git status --short
+
+    - name: Build Llama.cpp + ROCm + Smithy
+      run: |
+        cd llama.cpp
+        mkdir build && cd build
+        cmake .. -G Ninja \
+          -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
+          -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+          -DCMAKE_CXX_FLAGS="-I/opt/rocm/include" \
+          -DCMAKE_CROSSCOMPILING=ON \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DGPU_TARGETS="gfx1100" \
+          -DBUILD_SHARED_LIBS=ON \
+          -DLLAMA_BUILD_TESTS=OFF \
+          -DGGML_HIP=ON \
+          -DGGML_OPENMP=OFF \
+          -DGGML_CUDA_FORCE_CUBLAS=OFF \
+          -DGGML_RPC=ON \
+          -DGGML_HIP_ROCWMMA_FATTN=OFF \
+          -DLLAMA_BUILD_BORINGSSL=ON \
+          -DGGML_NATIVE=OFF \
+          -DGGML_STATIC=OFF \
+          -DCMAKE_SYSTEM_NAME=Linux
+        cmake --build . -j $(nproc)
+
+    - name: Copy ROCm core libs
+      run: |
+        build_bin_path="llama.cpp/build/bin"
+        [ -d /opt/rocm/lib/rocblas/library ] && cp -r /opt/rocm/lib/rocblas/library "$build_bin_path/rocblas/library"
+        [ -d /opt/rocm/lib/hipblaslt/library ] && cp -r /opt/rocm/lib/hipblaslt/library "$build_bin_path/hipblaslt/library"
+        for pattern in libhipblas librocblas libamdhip64 librocsolver libhipblaslt libamd_comgr libhsa-runtime64 librocm_kpack; do
+          cp -v /opt/rocm/lib/${pattern}*.so* "$build_bin_path/" 2>/dev/null || true
+        done
+
+    - name: Set RPATH for portable distribution
+      run: |
+        cd llama.cpp/build/bin
+        for file in *.so* llama-*; do
+          [ -f "$file" ] && [ ! -L "$file" ] && patchelf --set-rpath '$ORIGIN' "$file" 2>/dev/null || true
+        done
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: smithy-ubuntu-rocm-${{ matrix.gfx_target }}-x64
+        path: llama.cpp/build/bin/
+        retention-days: 30
+
+    - name: Set job outputs
+      id: set-outputs
+      run: |
+        rocm_version="${DETECTED_ROCM_VERSION:-${{ env.ROCM_VERSION }}}"
+        echo "rocm_version=$rocm_version" >> $GITHUB_OUTPUT
+        echo "llamacpp_commit_hash=${LLAMACPP_COMMIT_HASH}" >> $GITHUB_OUTPUT
+
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -rf llama.cpp /opt/rocm rocm.tar.gz 2>/dev/null || true
+
+  create-release:
+    needs: [prepare-matrix, build-windows, build-ubuntu]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    if: |
+      always() &&
+      (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
+      (needs.build-ubuntu.result == 'success' || needs.build-ubuntu.result == 'skipped') &&
+      (needs.build-windows.result == 'success' || needs.build-ubuntu.result == 'success') &&
+      github.event_name != 'pull_request' &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true') ||
+       github.event_name == 'schedule' || github.event_name == 'push')
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-artifacts
+
+    - name: Generate release tag
+      id: generate-tag
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^smithy-b[0-9]{4}$' | sort -V || echo "")
+        if [ -z "$existing_tags" ]; then
+          next_number=1000
+        else
+          highest=$(echo "$existing_tags" | tail -n 1 | sed 's/^smithy-b//')
+          next_number=$((highest + 1))
+        fi
+        TAG=$(printf "smithy-b%04d" $next_number)
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+    - name: Create archives
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        operating_systems="${{ env.OPERATING_SYSTEMS }}"
+        for os in ${operating_systems//,/ }; do
+          artifact_dir="./all-artifacts/smithy-${os}-rocm-${{ env.GFX_TARGETS }}-x64"
+          if [ -d "$artifact_dir" ]; then
+            (cd "$artifact_dir" && zip -r "../../smithy-${TAG}-${os}-rocm-${{ env.GFX_TARGETS }}-x64.zip" *)
+          fi
+        done
+
+    - name: Create Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        ROCM_VERSION="${{ needs.build-windows.outputs.rocm_version || needs.build-ubuntu.outputs.rocm_version }}"
+        LLAMACPP_COMMIT="${{ needs.build-windows.outputs.llamacpp_commit_hash || needs.build-ubuntu.outputs.llamacpp_commit_hash }}"
+        gh release create "$TAG" \
+          --title "$TAG" \
+          --notes "**Build**: $TAG
+**OS**: ${{ env.OPERATING_SYSTEMS }}
+**GPU Target**: ${{ env.GFX_TARGETS }}
+**ROCm Version**: $ROCM_VERSION
+**llama.cpp Commit**: $LLAMACPP_COMMIT
+**kernel-anvil**: applied via patches/smithy.patch
+**Built**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+llama.cpp with kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime." \
+          smithy-*.zip

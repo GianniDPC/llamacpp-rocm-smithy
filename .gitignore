@@ -1,0 +1,49 @@
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.pdb
+*.exp
+*.ilk
+
+# ROCm / TheRock
+rocm.tar.gz
+rocm/
+/opt/rocm
+C:/opt/rocm
+
+# llama.cpp clones
+llama.cpp/
+
+# Kernel-anvil working files
+*.hip
+*.gcn
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS
+*.tmp
+*.bak
+
+# CI
+.github/actions/
