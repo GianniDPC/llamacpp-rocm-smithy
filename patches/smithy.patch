@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index e779a9be9..2a8661b22 100644
+index 61041bd..177a2d7 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -4874,8 +4874,17 @@ void ggml_backend_cuda_get_device_description(int device, char * description, si
@@ -11,7 +11,7 @@ index e779a9be9..2a8661b22 100644
 +    cudaError_t err = cudaMemGetInfo(free, total);
 +    if (err != cudaSuccess || *total == 0) {
 +        // Workaround for TheRock bug: hipMemGetInfo fails or returns zeros on some configs
-+        // Fall back to hipGetDeviceProperties for total, assume all free
++        // Fall back to cudaGetDeviceProperties for total, assume all free
 +        cudaDeviceProp prop;
 +        memset(&prop, 0, sizeof(prop));
 +        cudaGetDeviceProperties(&prop, device);
@@ -44,7 +44,7 @@ index e779a9be9..2a8661b22 100644
  // ref: https://github.com/ggml-org/llama.cpp/pull/17368
  #if defined(__linux__)
 diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
-index fe44a58da..71d083709 100644
+index fe44a58..dcbd81d 100644
 --- a/ggml/src/ggml-cuda/mmvq.cu
 +++ b/ggml/src/ggml-cuda/mmvq.cu
 @@ -2,6 +2,7 @@
@@ -55,32 +55,10 @@ index fe44a58da..71d083709 100644
  
  #include <cstdint>
  
-@@ -449,6 +450,10 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
-                 return 1;
-         }
-     }
-+    // RDNA: rpb=2 when kernel-anvil profile says so (via small_k trigger)
-+    if (small_k && ncols_dst == 1) {
-+        return 2;
-+    }
-     return 1;
- }
- 
-@@ -469,6 +474,9 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int
-                 return 1;
-         }
-     }
-+    if (small_k && ncols_dst == 1) {
-+        return 2;
-+    }
-     return 1;
- }
- 
-@@ -873,6 +881,14 @@ static void mul_mat_vec_q_switch_ncols_dst(
+@@ -873,6 +874,13 @@ static void mul_mat_vec_q_switch_ncols_dst(
              use = false;
          }
  
-+        // kernel-anvil override: if smithy config says rpb>1 for this shape, force small_k
 +        if (!use && c_ncols_dst == 1) {
 +            smithy_shape_config scfg = smithy_lookup(type, nrows_x, ncols_x);
 +            if (scfg.rows_per_block > 1) {
@@ -93,7 +71,7 @@ index fe44a58da..71d083709 100644
  
 diff --git a/ggml/src/ggml-cuda/smithy-config.h b/ggml/src/ggml-cuda/smithy-config.h
 new file mode 100644
-index 000000000..0f669d6d4
+index 0000000..0f669d6
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/smithy-config.h
 @@ -0,0 +1,331 @@
