@@ -454,19 +454,23 @@ jobs:
         ROCM_VERSION: ${{ needs.build-windows.outputs.rocm_version || needs.build-ubuntu.outputs.rocm_version }}
         LLAMACPP_COMMIT: ${{ needs.build-windows.outputs.llamacpp_commit_hash || needs.build-ubuntu.outputs.llamacpp_commit_hash }}
         # Block scalar (`|`) preserves the multi-line notes verbatim.
-        # GitHub Actions interpolates ${{ ... }} and $VAR, the shell then sees the final string.
-        # Avoid putting this inline in a `run:` block — YAML's block-scalar indentation rule
-        # requires every continuation line to be indented at least as much as the first content
-        # line, which is why the previous version broke (the un-indented "**OS**:" line
-        # ended the | block and YAML then tried to parse ** as an alias).
+        # IMPORTANT: Only ${{ ... }} expressions are expanded by GitHub Actions in env
+        # values. Shell-style $VAR references are NOT expanded (they're literal text
+        # inside the env var's value), and $(...) command substitution is NOT executed
+        # (env values are not run through a shell). Use ${{ env.NAME }} to reference
+        # env vars and ${{ github.X }} for workflow-time values.
+        # Avoid putting this inline in a `run:` block — YAML's block-scalar indentation
+        # rule requires every continuation line to be indented at least as much as the
+        # first content line, which is why the previous version broke (the un-indented
+        # "**OS**:" line ended the | block and YAML then tried to parse ** as an alias).
         RELEASE_NOTES: |
           **Build**: ${{ steps.generate-tag.outputs.tag }}
           **OS**: ${{ env.OPERATING_SYSTEMS }}
           **GPU Target**: ${{ env.GFX_TARGETS }}
-          **ROCm Version**: $ROCM_VERSION
-          **llama.cpp Commit**: $LLAMACPP_COMMIT
+          **ROCm Version**: ${{ env.ROCM_VERSION }}
+          **llama.cpp Commit**: ${{ env.LLAMACPP_COMMIT }}
           **kernel-anvil**: applied via patches/smithy.patch
-          **Built**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Built**: ${{ github.run_started_at }}
 
           llama.cpp with kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime.
       run: |
