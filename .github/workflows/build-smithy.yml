@@ -221,6 +221,11 @@ jobs:
       run: |
         $buildBinPath = "llama.cpp\build\bin"
         $rocmBinPath = "C:\opt\rocm\bin"
+        # Create destination subdirs for the rocblas/hipblaslt library trees
+        # (Copy-Item -Recurse into a non-existent parent dir fails with
+        # "Could not find a part of the path" on Windows.)
+        New-Item -ItemType Directory -Force -Path "$buildBinPath\rocblas" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$buildBinPath\hipblaslt" | Out-Null
         $filesToCopy = @("amdhip64_*.dll","rocm_kpack.dll","amd_comgr*.dll","libhipblas.dll","rocblas.dll","rocsolver.dll","hipblaslt.dll","libhipblaslt.dll","hipblas.dll")
         foreach ($pattern in $filesToCopy) {
           Get-ChildItem -Path $rocmBinPath -Name $pattern -ErrorAction SilentlyContinue | ForEach-Object {
@@ -358,6 +363,10 @@ jobs:
     - name: Copy ROCm core libs
       run: |
         build_bin_path="llama.cpp/build/bin"
+        # Create destination subdirs for the rocblas/hipblaslt library trees
+        # (cp -r into a non-existent parent dir fails with
+        # "cannot create directory: No such file or directory".)
+        mkdir -p "$build_bin_path/rocblas" "$build_bin_path/hipblaslt"
         [ -d /opt/rocm/lib/rocblas/library ] && cp -r /opt/rocm/lib/rocblas/library "$build_bin_path/rocblas/library"
         [ -d /opt/rocm/lib/hipblaslt/library ] && cp -r /opt/rocm/lib/hipblaslt/library "$build_bin_path/hipblaslt/library"
         for pattern in libhipblas librocblas libamdhip64 librocsolver libhipblaslt libamd_comgr libhsa-runtime64 librocm_kpack; do
