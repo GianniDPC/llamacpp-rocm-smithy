@@ -12,9 +12,9 @@ on:
         required: false
         default: 'latest'
       llamacpp_version:
-        description: 'llama.cpp tag/branch/commit (must match what smithy.patch was generated against)'
+        description: 'llama.cpp tag/branch/commit. "latest" tracks master HEAD. If you pin a specific commit, smithy.patch must still apply against it (regenerate the patch from your local C:\llama.cpp working tree if needed).'
         required: false
-        default: 'ac4cdde'
+        default: 'latest'
       create_release:
         description: 'Create a GitHub release after successful build'
         required: false
@@ -37,7 +37,7 @@ on:
 env:
   OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'windows,ubuntu' }}
   ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
-  LLAMACPP_VERSION: ${{ github.event.inputs.llamacpp_version || 'ac4cdde' }}
+  LLAMACPP_VERSION: ${{ github.event.inputs.llamacpp_version || 'latest' }}
   # Single target: gfx1100 (RX 7900 XTX / RDNA3 dGPU). Extend by comma-separating: gfx1100;gfx1101;gfx1102;gfx1103
   GFX_TARGETS: 'gfx1100'
 
@@ -153,17 +153,17 @@ jobs:
         New-Item -ItemType Directory -Force -Path "C:\opt\rocm" | Out-Null
         tar -xzf rocm.tar.gz -C C:\opt\rocm --strip-components=1
 
-    - name: Clone llama.cpp at pinned version
+    - name: Clone llama.cpp
       run: |
         $llamacppVersion = "${{ env.LLAMACPP_VERSION }}"
         if ($llamacppVersion -eq "latest") {
           git clone --depth 1 --single-branch --branch master https://github.com/ggerganov/llama.cpp.git
+          Set-Location llama.cpp
         } else {
           git clone https://github.com/ggerganov/llama.cpp.git
-          cd llama.cpp
+          Set-Location llama.cpp
           git checkout $llamacppVersion
         }
-        cd llama.cpp
         $commitHash = git rev-parse --short=5 HEAD
         echo "LLAMACPP_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
 
@@ -305,17 +305,17 @@ jobs:
         echo "/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH" >> $GITHUB_PATH
         echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
 
-    - name: Clone llama.cpp at pinned version
+    - name: Clone llama.cpp
       run: |
         llamacpp_version="${{ env.LLAMACPP_VERSION }}"
         if [ "$llamacpp_version" = "latest" ]; then
           git clone --depth 1 --single-branch --branch master https://github.com/ggerganov/llama.cpp.git
+          cd llama.cpp
         else
           git clone https://github.com/ggerganov/llama.cpp.git
           cd llama.cpp
           git checkout "$llamacpp_version"
         fi
-        cd llama.cpp
         commit_hash=$(git rev-parse --short=5 HEAD)
         echo "LLAMACPP_COMMIT_HASH=$commit_hash" >> $GITHUB_ENV
 
