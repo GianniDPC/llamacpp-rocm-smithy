@@ -442,19 +442,27 @@ jobs:
     - name: Create Release
       env:
         GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        ROCM_VERSION: ${{ needs.build-windows.outputs.rocm_version || needs.build-ubuntu.outputs.rocm_version }}
+        LLAMACPP_COMMIT: ${{ needs.build-windows.outputs.llamacpp_commit_hash || needs.build-ubuntu.outputs.llamacpp_commit_hash }}
+        # Block scalar (`|`) preserves the multi-line notes verbatim.
+        # GitHub Actions interpolates ${{ ... }} and $VAR, the shell then sees the final string.
+        # Avoid putting this inline in a `run:` block — YAML's block-scalar indentation rule
+        # requires every continuation line to be indented at least as much as the first content
+        # line, which is why the previous version broke (the un-indented "**OS**:" line
+        # ended the | block and YAML then tried to parse ** as an alias).
+        RELEASE_NOTES: |
+          **Build**: ${{ steps.generate-tag.outputs.tag }}
+          **OS**: ${{ env.OPERATING_SYSTEMS }}
+          **GPU Target**: ${{ env.GFX_TARGETS }}
+          **ROCm Version**: $ROCM_VERSION
+          **llama.cpp Commit**: $LLAMACPP_COMMIT
+          **kernel-anvil**: applied via patches/smithy.patch
+          **Built**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          llama.cpp with kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime.
       run: |
         TAG="${{ steps.generate-tag.outputs.tag }}"
-        ROCM_VERSION="${{ needs.build-windows.outputs.rocm_version || needs.build-ubuntu.outputs.rocm_version }}"
-        LLAMACPP_COMMIT="${{ needs.build-windows.outputs.llamacpp_commit_hash || needs.build-ubuntu.outputs.llamacpp_commit_hash }}"
         gh release create "$TAG" \
           --title "$TAG" \
-          --notes "**Build**: $TAG
-**OS**: ${{ env.OPERATING_SYSTEMS }}
-**GPU Target**: ${{ env.GFX_TARGETS }}
-**ROCm Version**: $ROCM_VERSION
-**llama.cpp Commit**: $LLAMACPP_COMMIT
-**kernel-anvil**: applied via patches/smithy.patch
-**Built**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-llama.cpp with kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime." \
+          --notes "$RELEASE_NOTES" \
           smithy-*.zip
