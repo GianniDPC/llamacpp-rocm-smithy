@@ -1,0 +1,289 @@
+name: Build Llama.cpp Turboquant + ROCm + kernel-anvil (Smithy)
+
+# This is a SECOND build pipeline that targets TheTom/llama-cpp-turboquant
+# (a fork of llama.cpp with experimental quantization work). It is structurally
+# identical to build-smithy.yml except:
+#   - Clones TheTom/llama-cpp-turboquant instead of ggerganov/llama.cpp
+#   - Pins to the feature/turboquant-kv-cache branch by default
+#   - Windows-only (no build-ubuntu job)
+#   - Applies patches/smithy-turboquant.patch (regenerated against the fork —
+#     the fork's ggml-cuda.cu has ~200 extra lines from PR 17368 UMA support
+#     so the main smithy.patch's second hipMemGetInfo hunk doesn't apply cleanly)
+#   - Releases tagged turboquant-b#### (separate namespace from smithy-b####)
+#
+# Same ROCm 7 nightly, same gfx1100 target, same windows-2022 runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rocm_version:
+        description: 'ROCm version (e.g., 7.14.0a20260609) or "latest"'
+        required: false
+        default: 'latest'
+      turboquant_version:
+        description: 'TheTom/llama-cpp-turboquant branch/tag/commit. "latest" tracks the feature/turboquant-kv-cache branch HEAD.'
+        required: false
+        default: 'feature/turboquant-kv-cache'
+      create_release:
+        description: 'Create a GitHub release after successful build'
+        required: false
+        default: true
+        type: boolean
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  push:
+    branches: [main]
+    paths:
+      - 'patches/smithy-turboquant.patch'
+      - '.github/workflows/build-turboquant.yml'
+
+  # Every 2 days at 13:00 UTC (odd days of the month: 1, 3, 5, ...)
+  schedule:
+    - cron: '0 13 */2 * *'
+
+env:
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
+  LLAMACPP_VERSION: ${{ github.event.inputs.turboquant_version || 'feature/turboquant-kv-cache' }}
+  GFX_TARGETS: 'gfx1100'
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+    - name: Checkout repository (carries patches/smithy-turboquant.patch)
+      uses: actions/checkout@v4
+
+    - name: Clean up existing directories
+      run: |
+        if (Test-Path "llama.cpp") { Remove-Item -Recurse -Force "llama.cpp" }
+        if (Test-Path "C:\opt\rocm") { Remove-Item -Recurse -Force "C:\opt\rocm" }
+        if (Test-Path "rocm.tar.gz") { Remove-Item -Force "rocm.tar.gz" }
+
+    - name: Install Visual Studio Build Tools
+      run: |
+        $vsInstallerUrl = "https://aka.ms/vs/17/release/vs_buildtools.exe"
+        $vsInstallerPath = "$env:TEMP\vs_buildtools.exe"
+        Invoke-WebRequest -Uri $vsInstallerUrl -OutFile $vsInstallerPath
+        Start-Process -FilePath $vsInstallerPath -ArgumentList "--quiet", "--wait", "--norestart", `
+          "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", `
+          "--add", "Microsoft.VisualStudio.Component.VC.CMake.Project", `
+          "--add", "Microsoft.VisualStudio.Component.VC.ATL", `
+          "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621" -Wait
+        Remove-Item $vsInstallerPath -Force
+
+    - name: Install build dependencies (ninja, perl)
+      run: |
+        $ninjaUrl = "https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-win.zip"
+        New-Item -ItemType Directory -Force -Path "C:\ninja" | Out-Null
+        Invoke-WebRequest -Uri $ninjaUrl -OutFile "$env:TEMP\ninja-win.zip"
+        Expand-Archive -Path "$env:TEMP\ninja-win.zip" -DestinationPath "C:\ninja" -Force
+        $perlUrl = "http://strawberryperl.com/download/5.32.1.1/strawberry-perl-5.32.1.1-64bit.msi"
+        Invoke-WebRequest -Uri $perlUrl -OutFile "$env:TEMP\strawberry-perl.msi"
+        Start-Process msiexec.exe -ArgumentList "/i $env:TEMP\strawberry-perl.msi /quiet /norestart" -Wait
+        echo "C:\ninja" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Download ROCm nightly tarball (gfx110X-all)
+      run: |
+        $rocmVersion = "${{ env.ROCM_VERSION }}"
+        $s3Target = "gfx110X-all"
+        if ($rocmVersion -eq "latest") {
+          $s3Response = (Invoke-WebRequest "https://therock-nightly-tarball.s3.amazonaws.com/?prefix=therock-dist-windows-$s3Target-7").Content
+          $files = $s3Response -split '<Key>' | Where-Object {$_ -match '</Key>'} | ForEach-Object { ($_ -split '</Key>')[0] }
+          $versionFiles = @()
+          foreach ($file in $files) {
+            if ($file -match "therock-dist-windows-$s3Target-.*?(\d+\.\d+\.\d+(?:a|rc)\d+)\.tar\.gz") {
+              $versionFiles += [PSCustomObject]@{
+                File = $file
+                Version = $matches[1]
+                Major = [int]($matches[1] -split '\.')[0]
+                Minor = [int]($matches[1] -split '\.')[1]
+                Patch = [int](($matches[1] -split '\.')[2] -replace '(?:a|rc).*', '')
+                RC = [int]($matches[1] -replace '.*(?:a|rc)', '')
+                IsAlpha = $matches[1] -match 'a'
+              }
+            }
+          }
+          $latestFile = ($versionFiles | Sort-Object Major, Minor, Patch, @{Expression={if($_.IsAlpha){1}else{0}}}, RC | Select-Object -Last 1).File
+          $rocmVersion = $latestFile -replace ".*-$s3Target-(.*?)\.tar\.gz", '$1'
+          $rocmUrl = "https://therock-nightly-tarball.s3.amazonaws.com/$latestFile"
+        } else {
+          $rocmUrl = "https://therock-nightly-tarball.s3.amazonaws.com/therock-dist-windows-$s3Target-$rocmVersion.tar.gz"
+        }
+        echo "DETECTED_ROCM_VERSION=$rocmVersion" >> $env:GITHUB_ENV
+        Write-Host "Downloading: $rocmUrl"
+        Invoke-WebRequest -Uri $rocmUrl -OutFile "rocm.tar.gz"
+
+    - name: Extract ROCm to C:\opt\rocm
+      run: |
+        New-Item -ItemType Directory -Force -Path "C:\opt\rocm" | Out-Null
+        tar -xzf rocm.tar.gz -C C:\opt\rocm --strip-components=1
+
+    - name: Clone TheTom/llama-cpp-turboquant
+      # Clones into ./llama.cpp (the source repo is named llama-cpp-turboquant,
+      # but the build workflow expects a ./llama.cpp directory).
+      run: |
+        $llamacppVersion = "${{ env.LLAMACPP_VERSION }}"
+        if ($llamacppVersion -eq "latest" -or $llamacppVersion -eq "feature/turboquant-kv-cache") {
+          git clone --depth 1 --single-branch --branch feature/turboquant-kv-cache https://github.com/TheTom/llama-cpp-turboquant.git llama.cpp
+        } else {
+          git clone https://github.com/TheTom/llama-cpp-turboquant.git llama.cpp
+          Set-Location llama.cpp
+          git checkout $llamacppVersion
+        }
+        Set-Location llama.cpp
+        $commitHash = git rev-parse --short=5 HEAD
+        echo "LLAMACPP_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
+
+    - name: Apply kernel-anvil (Smithy) patch
+      run: |
+        Set-Location llama.cpp
+        $checkOutput = git apply --check ..\patches\smithy-turboquant.patch 2>&1
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::error::smithy-turboquant.patch does not apply cleanly against TheTom/llama-cpp-turboquant commit ${env:LLAMACPP_COMMIT_HASH}."
+          Write-Host "::error::Patch error: $checkOutput"
+          Write-Host "::error::Regenerate patches/smithy-turboquant.patch (see docs/manual_instructions.md) and commit the updated patch."
+          exit 1
+        }
+        git apply ..\patches\smithy-turboquant.patch
+        Write-Host "Smithy patch applied:"
+        git status --short
+
+    - name: Build Llama.cpp Turboquant + ROCm + Smithy
+      shell: cmd
+      run: |
+        set HIP_PATH=C:\opt\rocm
+        set HIP_PLATFORM=amd
+        set PATH=%HIP_PATH%\lib\llvm\bin;%HIP_PATH%\bin;%PATH%
+
+        call "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
+        set /p VS_PATH=<vs_path.txt
+        call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+
+        cd llama.cpp
+        mkdir build
+        cd build
+
+        cmake .. -G Ninja ^
+          -DCMAKE_C_COMPILER="C:\opt\rocm\lib\llvm\bin\clang.exe" ^
+          -DCMAKE_CXX_COMPILER="C:\opt\rocm\lib\llvm\bin\clang++.exe" ^
+          -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include" ^
+          -DCMAKE_CROSSCOMPILING=ON ^
+          -DCMAKE_BUILD_TYPE=Release ^
+          -DGPU_TARGETS="gfx1100" ^
+          -DBUILD_SHARED_LIBS=ON ^
+          -DLLAMA_BUILD_TESTS=OFF ^
+          -DGGML_HIP=ON ^
+          -DGGML_OPENMP=OFF ^
+          -DGGML_CUDA_FORCE_CUBLAS=OFF ^
+          -DGGML_RPC=ON ^
+          -DGGML_HIP_ROCWMMA_FATTN=OFF ^
+          -DLLAMA_BUILD_BORINGSSL=ON ^
+          -DGGML_NATIVE=OFF ^
+          -DGGML_STATIC=OFF ^
+          -DCMAKE_SYSTEM_NAME=Windows
+
+        cmake --build . -j %NUMBER_OF_PROCESSORS%
+
+    - name: Copy ROCm core DLLs to build directory
+      run: |
+        $buildBinPath = "llama.cpp\build\bin"
+        $rocmBinPath = "C:\opt\rocm\bin"
+        New-Item -ItemType Directory -Force -Path "$buildBinPath\rocblas" | Out-Null
+        New-Item -ItemType Directory -Force -Path "$buildBinPath\hipblaslt" | Out-Null
+        $filesToCopy = @("amdhip64_*.dll","rocm_kpack.dll","amd_comgr*.dll","libhipblas.dll","rocblas.dll","rocsolver.dll","hipblaslt.dll","libhipblaslt.dll","hipblas.dll")
+        foreach ($pattern in $filesToCopy) {
+          Get-ChildItem -Path $rocmBinPath -Name $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item "$rocmBinPath\$_" "$buildBinPath\$_"
+          }
+        }
+        if (Test-Path "$rocmBinPath\rocblas\library") { Copy-Item -Recurse -Force "$rocmBinPath\rocblas\library" "$buildBinPath\rocblas\library" }
+        if (Test-Path "$rocmBinPath\hipblaslt\library") { Copy-Item -Recurse -Force "$rocmBinPath\hipblaslt\library" "$buildBinPath\hipblaslt\library" }
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: turboquant-windows-rocm-${{ env.GFX_TARGETS }}-x64
+        path: llama.cpp/build/bin/
+        retention-days: 30
+
+    - name: Set job outputs
+      id: set-outputs
+      run: |
+        $rocmVersion = if ($env:DETECTED_ROCM_VERSION) { $env:DETECTED_ROCM_VERSION } else { $env:ROCM_VERSION }
+        echo "rocm_version=$rocmVersion" >> $env:GITHUB_OUTPUT
+        echo "llamacpp_commit_hash=$env:LLAMACPP_COMMIT_HASH" >> $env:GITHUB_OUTPUT
+
+    - name: Cleanup
+      if: always()
+      run: |
+        if (Test-Path "rocm.tar.gz") { Remove-Item -Force "rocm.tar.gz" }
+        if (Test-Path "C:\opt\rocm") { Remove-Item -Recurse -Force "C:\opt\rocm" }
+        if (Test-Path "llama.cpp") { Remove-Item -Recurse -Force "llama.cpp" }
+
+  create-release:
+    needs: build-windows
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    if: |
+      always() &&
+      needs.build-windows.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true') ||
+       github.event_name == 'schedule' || github.event_name == 'push')
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-artifacts
+
+    - name: Generate release tag
+      id: generate-tag
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^turboquant-b[0-9]{4}$' | sort -V || echo "")
+        if [ -z "$existing_tags" ]; then
+          next_number=1000
+        else
+          highest=$(echo "$existing_tags" | tail -n 1 | sed 's/^turboquant-b//')
+          next_number=$((highest + 1))
+        fi
+        TAG=$(printf "turboquant-b%04d" $next_number)
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+    - name: Create archive
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        artifact_dir="./all-artifacts/turboquant-windows-rocm-${{ env.GFX_TARGETS }}-x64"
+        if [ -d "$artifact_dir" ]; then
+          (cd "$artifact_dir" && zip -r "../../turboquant-${TAG}-windows-rocm-${{ env.GFX_TARGETS }}-x64.zip" *)
+        fi
+
+    - name: Create Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        ROCM_VERSION: ${{ needs.build-windows.outputs.rocm_version }}
+        LLAMACPP_COMMIT: ${{ needs.build-windows.outputs.llamacpp_commit_hash }}
+        RELEASE_NOTES: |
+          **Build**: ${{ steps.generate-tag.outputs.tag }}
+          **OS**: windows
+          **GPU Target**: ${{ env.GFX_TARGETS }}
+          **ROCm Version**: ${{ env.ROCM_VERSION }}
+          **llama.cpp-turboquant Commit**: ${{ env.LLAMACPP_COMMIT }}
+          **kernel-anvil**: applied via patches/smithy-turboquant.patch
+          **Built**: ${{ github.run_started_at }}
+
+          llama.cpp with turboquant-kv-cache (TheTom/llama-cpp-turboquant fork) + kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime.
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        gh release create "$TAG" \
+          --title "$TAG" \
+          --notes "$RELEASE_NOTES" \
+          turboquant-*.zip

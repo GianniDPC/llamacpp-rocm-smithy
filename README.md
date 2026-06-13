@@ -63,6 +63,8 @@ $env:SMITHY_CONFIG="H:/path/to/your/model.json"  # optional: kernel-anvil JSON
 
 Builds cross-compile on `windows-2022` and `ubuntu-22.04` GitHub-hosted runners (no GPU in CI). Releases are published automatically as `smithy-b####` tags.
 
+A second workflow `.github/workflows/build-turboquant.yml` builds [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant) (a fork with experimental turboquant-kv-cache) on Windows only, on the same every-2-days schedule, releasing as `turboquant-b####`.
+
 ## Patch Details
 
 The patch in `patches/smithy.patch` contains 3 changes against llama.cpp master:
