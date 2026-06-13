@@ -168,7 +168,7 @@ jobs:
         cmake .. -G Ninja ^
           -DCMAKE_C_COMPILER="C:\opt\rocm\lib\llvm\bin\clang.exe" ^
           -DCMAKE_CXX_COMPILER="C:\opt\rocm\lib\llvm\bin\clang++.exe" ^
-          -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include" ^
+          -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include -Wno-ignored-attributes -Wno-language-extension-token" ^
           -DCMAKE_CROSSCOMPILING=ON ^
           -DCMAKE_BUILD_TYPE=Release ^
           -DGPU_TARGETS="gfx1100" ^
@@ -269,21 +269,29 @@ jobs:
     - name: Create Release
       env:
         GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        # Capture the step-resolved values from needs.* into shell vars so they're
+        # available in the heredoc below. (${{ env.X }} in a block scalar resolves
+        # to the workflow-level env, not the step-level env — that's why the previous
+        # version showed "ROCm Version: latest" instead of the detected version.)
         ROCM_VERSION: ${{ needs.build-windows.outputs.rocm_version }}
         LLAMACPP_COMMIT: ${{ needs.build-windows.outputs.llamacpp_commit_hash }}
-        RELEASE_NOTES: |
-          **Build**: ${{ steps.generate-tag.outputs.tag }}
-          **OS**: windows
-          **GPU Target**: ${{ env.GFX_TARGETS }}
-          **ROCm Version**: ${{ env.ROCM_VERSION }}
-          **llama.cpp-turboquant Commit**: ${{ env.LLAMACPP_COMMIT }}
-          **kernel-anvil**: applied via patches/smithy-turboquant.patch
-          **Built**: ${{ github.run_started_at }}
-
-          llama.cpp with turboquant-kv-cache (TheTom/llama-cpp-turboquant fork) + kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime.
       run: |
         TAG="${{ steps.generate-tag.outputs.tag }}"
+        BUILT_AT=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+        # Build notes with printf to keep `**` inside double-quoted strings (avoids YAML
+        # parsing the un-indented `**Build**:` line as an alias anchor).
+        {
+          printf '%s\n' "**Build**: $TAG"
+          printf '%s\n' "**OS**: windows"
+          printf '%s\n' "**GPU Target**: ${{ env.GFX_TARGETS }}"
+          printf '%s\n' "**ROCm Version**: ${{ needs.build-windows.outputs.rocm_version }}"
+          printf '%s\n' "**llama.cpp-turboquant Commit**: ${{ needs.build-windows.outputs.llamacpp_commit_hash }}"
+          printf '%s\n' "**kernel-anvil**: applied via patches/smithy-turboquant.patch"
+          printf '%s\n' "**Built**: $BUILT_AT"
+          printf '\n'
+          printf '%s\n' "llama.cpp with turboquant-kv-cache (TheTom/llama-cpp-turboquant fork) + kernel-anvil (Smithy) MMVQ runtime config support. Set SMITHY_CONFIG=/path/to/your/model.json at runtime."
+        } > /tmp/release_notes.md
         gh release create "$TAG" \
           --title "$TAG" \
-          --notes "$RELEASE_NOTES" \
+          --notes-file /tmp/release_notes.md \
           turboquant-*.zip
