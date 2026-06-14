@@ -168,7 +168,7 @@ jobs:
         cmake .. -G Ninja ^
           -DCMAKE_C_COMPILER="C:\opt\rocm\lib\llvm\bin\clang.exe" ^
           -DCMAKE_CXX_COMPILER="C:\opt\rocm\lib\llvm\bin\clang++.exe" ^
-          -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include -Wno-ignored-attributes -Wno-language-extension-token" ^
+          -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include -Wno-ignored-attributes -Wno-language-extension-token -mllvm --amdgpu-unroll-threshold-local=600" ^
           -DCMAKE_CROSSCOMPILING=ON ^
           -DCMAKE_BUILD_TYPE=Release ^
           -DGPU_TARGETS="gfx1100" ^
@@ -182,6 +182,7 @@ jobs:
           -DLLAMA_BUILD_BORINGSSL=ON ^
           -DGGML_NATIVE=OFF ^
           -DGGML_STATIC=OFF ^
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON ^
           -DCMAKE_SYSTEM_NAME=Windows
 
         cmake --build . -j %NUMBER_OF_PROCESSORS%
