@@ -345,7 +345,6 @@ jobs:
           -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
           -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
           -DCMAKE_CXX_FLAGS="-I/opt/rocm/include -Wno-gnu-anonymous-struct -Wno-nested-anon-types -Wno-language-extension-token" \
-          -DCMAKE_HIP_FLAGS="--amdgpu-unroll-threshold-local=600" \
           -DCMAKE_CROSSCOMPILING=ON \
           -DCMAKE_BUILD_TYPE=Release \
           -DGPU_TARGETS="gfx1100" \
