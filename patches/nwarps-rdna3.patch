@@ -1,0 +1,20 @@
+diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
+index da48f31..3d5419d 100644
+--- a/ggml/src/ggml-cuda/mmvq.cu
++++ b/ggml/src/ggml-cuda/mmvq.cu
+@@ -351,6 +351,7 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
+     if (table_id == MMVQ_PARAMETERS_RDNA3_0) {
+         // RDNA3 (W7900): stricter whitelist than RDNA4.
+         // Q2_K / Q5_K / IQ4_XS regress in full quant sweeps.
++        // PR #23528: Q4_K falls through to default (nwarps=1).
+         if (ncols_dst == 1) {
+             switch (type) {
+                 case GGML_TYPE_Q4_0:
+@@ -358,7 +359,6 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
+                 case GGML_TYPE_Q5_0:
+                 case GGML_TYPE_Q5_1:
+                 case GGML_TYPE_Q8_0:
+-                case GGML_TYPE_Q4_K:
+                 case GGML_TYPE_Q6_K:
+                 case GGML_TYPE_IQ4_NL:
+                     return 8;

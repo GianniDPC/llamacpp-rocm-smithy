@@ -136,18 +136,25 @@ jobs:
         $commitHash = git rev-parse --short=5 HEAD
         echo "LLAMACPP_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
 
-    - name: Apply kernel-anvil (Smithy) patch
+    - name: Apply RDNA3 nwarps + kernel-anvil (Smithy) patches
       run: |
         Set-Location llama.cpp
-        $checkOutput = git apply --check ..\patches\smithy-turboquant.patch 2>&1
-        if ($LASTEXITCODE -ne 0) {
-          Write-Host "::error::smithy-turboquant.patch does not apply cleanly against TheTom/llama-cpp-turboquant commit ${env:LLAMACPP_COMMIT_HASH}."
-          Write-Host "::error::Patch error: $checkOutput"
-          Write-Host "::error::Regenerate patches/smithy-turboquant.patch (see docs/manual_instructions.md) and commit the updated patch."
-          exit 1
+        $patches = @(
+          "..\patches\nwarps-rdna3.patch",
+          "..\patches\smithy-turboquant.patch"
+        )
+        foreach ($p in $patches) {
+          $checkOutput = git apply --check $p 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::$p does not apply cleanly against TheTom/llama-cpp-turboquant commit ${env:LLAMACPP_COMMIT_HASH}."
+            Write-Host "::error::Patch error: $checkOutput"
+            Write-Host "::error::Regenerate the failing patch (see docs/manual_instructions.md) and commit the updated patch."
+            exit 1
+          }
+          git apply $p
+          Write-Host "  applied $p"
         }
-        git apply ..\patches\smithy-turboquant.patch
-        Write-Host "Smithy patch applied:"
+        Write-Host "All patches applied:"
         git status --short
 
     - name: Build Llama.cpp Turboquant + ROCm + Smithy
