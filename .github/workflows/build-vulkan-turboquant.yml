@@ -1,0 +1,154 @@
+name: Build Llama.cpp turboquant (Vulkan)
+
+on:
+  workflow_dispatch:
+    inputs:
+      turboquant_version:
+        description: 'Branch or commit of TheTom/llama-cpp-turboquant'
+        required: false
+        default: 'feature/turboquant-kv-cache'
+      create_release:
+        description: 'Create a GitHub release after successful build'
+        required: false
+        default: true
+        type: boolean
+
+  pull_request:
+    paths:
+      - '.github/workflows/build-vulkan-turboquant.yml'
+
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-vulkan-turboquant.yml'
+
+  schedule:
+    - cron: '0 13 */2 * *'
+
+env:
+  TURBOQUANT_VERSION: ${{ github.event.inputs.turboquant_version || 'feature/turboquant-kv-cache' }}
+  GFX_TARGETS: 'gfx1100'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout our repo (carries no patches — Vulkan build is patch-free)
+      uses: actions/checkout@v4
+
+    - name: Clean up
+      run: |
+        if (Test-Path "llama.cpp") { Remove-Item -Recurse -Force "llama.cpp" }
+
+    - name: Clone TheTom/llama-cpp-turboquant
+      run: |
+        $branch = "${{ env.TURBOQUANT_VERSION }}"
+        Write-Host "Cloning TheTom/llama-cpp-turboquant branch: $branch"
+        if ($branch -match '^[0-9a-f]{7,40}$') {
+          git clone https://github.com/TheTom/llama-cpp-turboquant.git llama.cpp
+          cd llama.cpp
+          git checkout $branch
+        } else {
+          git clone --depth 1 --single-branch --branch $branch https://github.com/TheTom/llama-cpp-turboquant.git llama.cpp
+        }
+        cd llama.cpp
+        $commitHash = git rev-parse --short=7 HEAD
+        $commitMsg = git log -1 --pretty=format:"%s"
+        echo "LLAMACPP_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
+        echo "LLAMACPP_COMMIT_MSG=$commitMsg" >> $env:GITHUB_ENV
+        Write-Host "HEAD: $commitHash ($commitMsg)"
+
+    - name: Build llama.cpp + Vulkan
+      run: |
+        cd llama.cpp
+        mkdir build
+        cd build
+        cmake .. -G Ninja `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DGGML_VULKAN=ON `
+          -DBUILD_SHARED_LIBS=ON `
+          -DLLAMA_BUILD_TESTS=OFF `
+          -DLLAMA_BUILD_BORINGSSL=ON `
+          -DGGML_NATIVE=OFF `
+          -DGGML_STATIC=OFF
+        cmake --build . -j $env:NUMBER_OF_PROCESSORS
+
+    - name: List built binaries
+      run: |
+        Get-ChildItem llama.cpp\build\bin\*.exe | ForEach-Object { Write-Host "  $($_.Name) ($([Math]::Round($_.Length/1MB,1)) MB)" }
+        Get-ChildItem llama.cpp\build\bin\*.dll | ForEach-Object { Write-Host "  $($_.Name) ($([Math]::Round($_.Length/1MB,1)) MB)" }
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: turboquant-vulkan-windows-x64
+        path: llama.cpp/build/bin/
+        retention-days: 30
+
+  create-release:
+    needs: build-windows
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    if: |
+      always() &&
+      needs.build-windows.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      ((github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true') ||
+       github.event_name == 'schedule' || github.event_name == 'push')
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-artifacts
+
+    - name: Generate release tag
+      id: generate-tag
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^turbo-vulkan-b[0-9]{4}$' | sort -V || echo "")
+        if [ -z "$existing_tags" ]; then
+          next_number=1000
+        else
+          highest=$(echo "$existing_tags" | tail -n 1 | sed 's/^turbo-vulkan-b//')
+          next_number=$((highest + 1))
+        fi
+        TAG=$(printf "turbo-vulkan-b%04d" $next_number)
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+
+    - name: Create archives
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        artifact_dir="./all-artifacts/turboquant-vulkan-windows-x64"
+        if [ -d "$artifact_dir" ]; then
+          (cd "$artifact_dir" && zip -r "../../${TAG}-windows-x64.zip" *)
+        fi
+
+    - name: Create Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        LLAMACPP_COMMIT: ${{ needs.build-windows.outputs.llamacpp_commit_hash || '' }}
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        COMMIT="${{ needs.build-windows.outputs.llamacpp_commit_hash || 'unknown' }}"
+        {
+          printf '%s\n' "**Build**: $TAG"
+          printf '%s\n' "**OS**: windows"
+          printf '%s\n' "**Backend**: Vulkan (no ROCm, no HIP)"
+          printf '%s\n' "**GPU Target**: auto-detect (Vulkan ICD)"
+          printf '%s\n' "**llama.cpp-turboquant Commit**: $COMMIT"
+          printf '%s\n' "**Patches**: none (clean build)"
+          printf '%s\n' "**Built**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          printf '\n'
+          printf '%s\n' "Llama.cpp turboquant fork (TheTom/llama-cpp-turboquant) with Vulkan backend. No kernel-anvil (Smithy) patches — this is a vanilla turboquant build with Vulkan for maximum portability. Requires Vulkan-capable GPU + driver (AMD RADV on Linux, AMDVLK on Windows)."
+        } > /tmp/release_notes.md
+        gh release create "$TAG" \
+          --title "$TAG" \
+          --notes-file /tmp/release_notes.md \
+          turbo-vulkan-*.zip
