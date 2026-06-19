@@ -1,8 +1,8 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 61041bd..177a2d7 100644
+index 3d4b5f6..294d8d0 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -4874,8 +4874,17 @@ void ggml_backend_cuda_get_device_description(int device, char * description, si
+@@ -4833,8 +4833,17 @@ void ggml_backend_cuda_get_device_description(int device, char * description, si
  
  void ggml_backend_cuda_get_device_memory(int device, size_t * free, size_t * total) {
      ggml_cuda_set_device(device);
@@ -22,9 +22,9 @@ index 61041bd..177a2d7 100644
  }
  
  bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size) {
-@@ -5010,7 +5019,19 @@ static void ggml_backend_cuda_device_get_memory(ggml_backend_dev_t dev, size_t *
- #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
- 
+@@ -4972,7 +4981,19 @@ static bool ggml_backend_cuda_get_available_uma_memory(long * available_memory_k
+ static void ggml_backend_cuda_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
+     ggml_backend_cuda_device_context * ctx = (ggml_backend_cuda_device_context *)dev->context;
      ggml_cuda_set_device(ctx->device);
 -    CUDA_CHECK(cudaMemGetInfo(free, total));
 +
