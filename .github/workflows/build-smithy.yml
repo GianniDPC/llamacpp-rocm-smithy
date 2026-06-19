@@ -157,10 +157,10 @@ jobs:
       run: |
         $llamacppVersion = "${{ env.LLAMACPP_VERSION }}"
         if ($llamacppVersion -eq "latest") {
-          git clone --depth 1 --single-branch --branch master https://github.com/ggerganov/llama.cpp.git
+          git clone --depth 1 --single-branch --branch master https://github.com/ggml-org/llama.cpp.git
           Set-Location llama.cpp
         } else {
-          git clone https://github.com/ggerganov/llama.cpp.git
+          git clone https://github.com/ggml-org/llama.cpp.git
           Set-Location llama.cpp
           git checkout $llamacppVersion
         }
@@ -315,10 +315,10 @@ jobs:
       run: |
         llamacpp_version="${{ env.LLAMACPP_VERSION }}"
         if [ "$llamacpp_version" = "latest" ]; then
-          git clone --depth 1 --single-branch --branch master https://github.com/ggerganov/llama.cpp.git
+          git clone --depth 1 --single-branch --branch master https://github.com/ggml-org/llama.cpp.git
           cd llama.cpp
         else
-          git clone https://github.com/ggerganov/llama.cpp.git
+          git clone https://github.com/ggml-org/llama.cpp.git
           cd llama.cpp
           git checkout "$llamacpp_version"
         fi
