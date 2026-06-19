@@ -44,16 +44,13 @@ jobs:
 
     - name: Install Vulkan SDK
       run: |
-        Write-Host "Installing Vulkan SDK $env:VULKAN_VERSION via Chocolatey..."
-        choco install vulkan-sdk --version=$env:VULKAN_VERSION -y --no-progress 2>&1 | Select-Object -Last 5
-        # Set VULKAN_SDK for cmake FindVulkan
-        $sdkRoot = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name | Select-Object -Last 1).FullName
-        if (-not $sdkRoot) { $sdkRoot = "C:\VulkanSDK" }
-        echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
-        echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
-        echo "$sdkRoot\Lib" >> $env:GITHUB_PATH
-        Write-Host "VULKAN_SDK=$sdkRoot"
-        & "$sdkRoot\Bin\glslc.exe" --version 2>&1
+        # Download the official LunarG installer (matches ggml-org/llama.cpp release.yml)
+        curl.exe -o "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" -L "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+        & "$env:RUNNER_TEMP\VulkanSDK-Installer.exe" --accept-licenses --default-answer --confirm-command install
+        echo "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" >> $env:GITHUB_ENV
+        echo "C:\VulkanSDK\$env:VULKAN_VERSION\bin" >> $env:GITHUB_PATH
+        Write-Host "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION"
+        & "C:\VulkanSDK\$env:VULKAN_VERSION\Bin\glslc.exe" --version 2>&1
 
     - name: Clone TheTom/llama-cpp-turboquant
       run: |
