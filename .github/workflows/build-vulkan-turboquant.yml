@@ -28,6 +28,7 @@ on:
 env:
   TURBOQUANT_VERSION: ${{ github.event.inputs.turboquant_version || 'feature/turboquant-kv-cache' }}
   GFX_TARGETS: 'gfx1100'
+  VULKAN_VERSION: '1.4.313.2'  # pin to match user's local SDK; update when upgrading
 
 jobs:
   build-windows:
@@ -43,8 +44,8 @@ jobs:
 
     - name: Install Vulkan SDK
       run: |
-        Write-Host "Installing Vulkan SDK via Chocolatey..."
-        choco install vulkan-sdk -y --no-progress 2>&1 | Select-Object -Last 5
+        Write-Host "Installing Vulkan SDK $env:VULKAN_VERSION via Chocolatey..."
+        choco install vulkan-sdk --version=$env:VULKAN_VERSION -y --no-progress 2>&1 | Select-Object -Last 5
         # Set VULKAN_SDK for cmake FindVulkan
         $sdkRoot = (Get-ChildItem "C:\VulkanSDK" -Directory | Sort-Object Name | Select-Object -Last 1).FullName
         if (-not $sdkRoot) { $sdkRoot = "C:\VulkanSDK" }
