@@ -70,17 +70,15 @@ jobs:
         echo "LLAMACPP_COMMIT_MSG=$commitMsg" >> $env:GITHUB_ENV
         Write-Host "HEAD: $commitHash ($commitMsg)"
 
-    - name: Install Ninja
-      run: |
-        choco install ninja -y --no-progress
-
-    - name: Build llama.cpp + Vulkan
+    - name: Build llama.cpp + Vulkan (MSVC)
       run: |
         cd llama.cpp
         mkdir build
         cd build
-        cmake .. -G Ninja `
-          -DCMAKE_BUILD_TYPE=Release `
+        # No -G flag: cmake defaults to Visual Studio 17 2022 (MSVC) on windows-latest.
+        # MSVC links against vcruntime140.dll (always present on Windows) instead of
+        # MinGW's libgcc/libstdc++/libwinpthread which users don't have.
+        cmake .. `
           -DGGML_NATIVE=OFF `
           -DBUILD_SHARED_LIBS=ON `
           -DLLAMA_BUILD_SERVER=ON `
@@ -88,18 +86,28 @@ jobs:
           -DGGML_BACKEND_DL=ON `
           -DGGML_CPU_ALL_VARIANTS=ON `
           -DGGML_VULKAN=ON
-        cmake --build . -j $env:NUMBER_OF_PROCESSORS
+        cmake --build . --config Release -j $env:NUMBER_OF_PROCESSORS
 
-    - name: List built binaries
+    - name: Collect build output
       run: |
-        Get-ChildItem llama.cpp\build\bin\*.exe | ForEach-Object { Write-Host "  $($_.Name) ($([Math]::Round($_.Length/1MB,1)) MB)" }
-        Get-ChildItem llama.cpp\build\bin\*.dll | ForEach-Object { Write-Host "  $($_.Name) ($([Math]::Round($_.Length/1MB,1)) MB)" }
+        # VS multi-config generator puts Release binaries in build/bin/Release/
+        # Copy everything flat into a staging dir for the artifact
+        $staging = "staging"
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        $dirs = @("llama.cpp\build\bin\Release", "llama.cpp\build\bin")
+        foreach ($d in $dirs) {
+          if (Test-Path $d) {
+            Get-ChildItem "$d\*.exe","$d\*.dll" | Copy-Item -Destination $staging -Force
+          }
+        }
+        Write-Host "Staged files:"
+        Get-ChildItem "$staging\*" | ForEach-Object { Write-Host "  $($_.Name) ($([Math]::Round($_.Length/1MB,1)) MB)" }
 
     - name: Upload build artifact
       uses: actions/upload-artifact@v4
       with:
         name: turboquant-vulkan-windows-x64
-        path: llama.cpp/build/bin/
+        path: staging/
         retention-days: 30
 
   create-release:
