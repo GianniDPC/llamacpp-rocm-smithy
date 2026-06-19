@@ -72,6 +72,10 @@ jobs:
         echo "LLAMACPP_COMMIT_MSG=$commitMsg" >> $env:GITHUB_ENV
         Write-Host "HEAD: $commitHash ($commitMsg)"
 
+    - name: Install Ninja
+      run: |
+        choco install ninja -y --no-progress
+
     - name: Build llama.cpp + Vulkan
       run: |
         cd llama.cpp
@@ -79,12 +83,12 @@ jobs:
         cd build
         cmake .. -G Ninja `
           -DCMAKE_BUILD_TYPE=Release `
-          -DGGML_VULKAN=ON `
-          -DBUILD_SHARED_LIBS=ON `
-          -DLLAMA_BUILD_TESTS=OFF `
-          -DLLAMA_BUILD_BORINGSSL=ON `
           -DGGML_NATIVE=OFF `
-          -DGGML_STATIC=OFF
+          -DLLAMA_BUILD_SERVER=ON `
+          -DGGML_RPC=ON `
+          -DGGML_BACKEND_DL=ON `
+          -DGGML_CPU_ALL_VARIANTS=ON `
+          -DGGML_VULKAN=ON
         cmake --build . -j $env:NUMBER_OF_PROCESSORS
 
     - name: List built binaries
