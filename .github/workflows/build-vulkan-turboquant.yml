@@ -33,6 +33,8 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      llamacpp_commit_hash: ${{ steps.clone.outputs.llamacpp_commit_hash }}
 
     steps:
     - name: Checkout our repo (carries no patches — Vulkan build is patch-free)
@@ -53,6 +55,7 @@ jobs:
         & "C:\VulkanSDK\$env:VULKAN_VERSION\Bin\glslc.exe" --version 2>&1
 
     - name: Clone TheTom/llama-cpp-turboquant
+      id: clone
       run: |
         $branch = "${{ env.TURBOQUANT_VERSION }}"
         Write-Host "Cloning TheTom/llama-cpp-turboquant branch: $branch"
@@ -68,6 +71,7 @@ jobs:
         $commitMsg = git log -1 --pretty=format:"%s"
         echo "LLAMACPP_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
         echo "LLAMACPP_COMMIT_MSG=$commitMsg" >> $env:GITHUB_ENV
+        echo "llamacpp_commit_hash=$commitHash" >> $env:GITHUB_OUTPUT
         Write-Host "HEAD: $commitHash ($commitMsg)"
 
     - name: Build llama.cpp + Vulkan (MSVC)
@@ -134,7 +138,7 @@ jobs:
     - name: Generate release tag
       id: generate-tag
       env:
-        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^turbo-vulkan-b[0-9]{4}$' | sort -V || echo "")
         if [ -z "$existing_tags" ]; then
@@ -156,7 +160,7 @@ jobs:
 
     - name: Create Release
       env:
-        GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         LLAMACPP_COMMIT: ${{ needs.build-windows.outputs.llamacpp_commit_hash || '' }}
       run: |
         TAG="${{ steps.generate-tag.outputs.tag }}"
