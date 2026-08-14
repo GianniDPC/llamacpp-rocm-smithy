@@ -137,18 +137,16 @@ jobs:
 
     - name: Generate release tag
       id: generate-tag
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^turbo-vulkan-b[0-9]{4}$' | sort -V || echo "")
-        if [ -z "$existing_tags" ]; then
-          next_number=1000
-        else
-          highest=$(echo "$existing_tags" | tail -n 1 | sed 's/^turbo-vulkan-b//')
-          next_number=$((highest + 1))
-        fi
+        # Probe actual git tags, not just published releases: a failed
+        # `gh release create` (asset upload error) leaves an orphaned git tag
+        # with no release, so scanning `gh release list` alone can re-select an
+        # already-taken tag and the release step keeps failing.
+        highest=$(git ls-remote --tags origin | grep -o 'turbo-vulkan-b[0-9]*$' | sed 's/turbo-vulkan-b//' | sort -n | tail -n 1)
+        next_number=$(( ${highest:-999} + 1 ))
         TAG=$(printf "turbo-vulkan-b%04d" $next_number)
-        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+        echo "Picked tag: ${TAG}"
 
     - name: Create archives
       run: |
@@ -176,7 +174,21 @@ jobs:
           printf '\n'
           printf '%s\n' "Llama.cpp turboquant fork (TheTom/llama-cpp-turboquant) with Vulkan backend. No kernel-anvil (Smithy) patches — this is a vanilla turboquant build with Vulkan for maximum portability. Requires Vulkan-capable GPU + driver (AMD RADV on Linux, AMDVLK on Windows)."
         } > /tmp/release_notes.md
-        gh release create "$TAG" \
-          --title "$TAG" \
-          --notes-file /tmp/release_notes.md \
-          turbo-vulkan-*.zip
+        # `gh release create` with assets uploads via a draft-first flow: the
+        # release is created as a draft, the assets are uploaded, then it is
+        # published. A transient upload failure deletes the draft but leaves the
+        # git tag behind (causing the next run to re-select the same tag). The
+        # tag probing above skips orphaned tags, and this retry rides out
+        # transient upload errors.
+        for attempt in 1 2 3; do
+          if gh release create "$TAG" \
+             --title "$TAG" \
+             --notes-file /tmp/release_notes.md \
+             "$TAG-windows-x64.zip"; then
+            echo "Release $TAG created (attempt $attempt)"
+            exit 0
+          fi
+          echo "Attempt $attempt failed, retrying in 15s..."
+          sleep 15
+        done
+        exit 1
